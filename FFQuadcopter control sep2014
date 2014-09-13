@@ -1,0 +1,425 @@
+#ifndef QUADARDU
+#define QUADARDU
+
+#include <Wire.h> 
+#include <Servo.h>
+#include <SD.h>
+#include <I2Cdev.h>
+#include <helper_3dmath.h>
+#include <MPU6050_6Axis_MotionApps20.h>
+#include <PID_v1.h>
+
+Servo myservo1;  // create servo object to control a servo 
+Servo myservo2; 
+Servo myservo3; 
+Servo myservo4; 
+
+volatile unsigned long ppm_length[6] = {1500, 1500, 1500, 1500, 1500, 1500}; //servo pulselengths are stored in this array
+volatile unsigned long last_time = 0; //couter to identify servo's in the ppm signal
+volatile int counter=0;
+
+int sampleNum=500;
+
+float Input_aileron;
+float Input_elevator; 
+float Input_throttle;
+float Input_rudder;
+float Input_knobA;
+float Input_knobB;
+
+float Output_aileron;
+float Output_elevator; 
+float Output_rudder;
+
+int Input_aileron_offset;
+int Input_elevator_offset;
+int Input_rudder_offset;
+
+float pid_Kp=0.3;
+float pid_Ki=0;
+float pid_Kd=0.010;
+float pidyaw_Kp=4;
+float pidyaw_Ki=0;
+float pidyaw_Kd=0.070;
+
+float setpoint_roll=0;
+float setpoint_pitch=0;
+float setpoint_yaw=0;
+unsigned long oldtime;
+
+float output_motor_left_front;
+float output_motor_right_front;
+float output_motor_left_back;
+float output_motor_right_back;
+
+int m=0;
+#define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
+bool blinkState = false;
+
+MPU6050 mpu;   
+bool dmpReady = false;  // set true if DMP init was successful// mpu interface object
+uint8_t mpuIntStatus;                  // mpu statusbyte
+uint8_t devStatus;                     // device status    
+uint16_t packetSize;                   // estimated packet size  
+uint16_t fifoCount;                    // fifo buffer size   
+uint8_t fifoBuffer[64];                // fifo buffer 
+
+Quaternion q;                          // quaternion for mpu output
+VectorFloat gravity;                   // gravity vector for ypr
+float ypr[3];       // yaw pitch roll values
+float yprLast[3];
+
+
+int index = 0;                  // the index of the current reading
+int yaw_rev_count = 0;
+
+PID rollPID(&ypr[2], &Output_aileron, &setpoint_roll, pid_Kp, pid_Ki, pid_Kd, REVERSE);
+PID pitchPID(&ypr[1], &Output_elevator, &setpoint_pitch, pid_Kp, pid_Ki, pid_Kd, REVERSE);
+PID yawPID(&ypr[0], &Output_rudder, &setpoint_yaw, pidyaw_Kp, pidyaw_Ki, pidyaw_Kd, REVERSE);
+
+
+
+// ===               INTERRUPT DETECTION ROUTINE DMP               ===
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+void dmpDataReady() {
+    mpuInterrupt = true;
+}
+
+
+
+// Interrupt Service Routine (ISR) detecting PPM signal
+void isr ()
+{
+  if (micros()- last_time > 2500){ counter = 0 ;} // end of pulsetrain, start of new
+  
+  else if (micros()- last_time < 800){ } //do nothing with pause between pulses
+  
+  else   // what remains is the servo pulse, value stored in volatile memory, counter increased by one
+  {
+  ppm_length[counter] = micros() - last_time;
+  counter += 1;
+  }
+  last_time = micros();
+   
+}  // end of isr
+
+
+
+void setup ()
+{
+  attachInterrupt (0, isr, CHANGE);  // attach interrupt handler
+    
+  
+   // initRegulators();
+   
+    //supply your own gyro offsets here, scaled for min sensitivity
+    //mpu.setXGyroOffset(220);
+    //mpu.setYGyroOffset(76);
+    //mpu.setZGyroOffset(-85);
+    //mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+   
+  myservo1.attach(5);  // attaches the servo on pin 9 to the servo object 
+  myservo2.attach(6);  // attaches the servo on pin 9 to the servo object 
+  myservo3.attach(9);  // attaches the servo on pin 9 to the servo object 
+  myservo4.attach(10);  // attaches the servo on pin 9 to the servo object 
+  
+  
+    delay(2000);
+  for(int n=0;n<sampleNum;n++)  // calculate rc input signal offsets
+    { 
+  getYPR();   //get gyro data
+  Input_aileron_offset += (ppm_length[0] - 1500); 
+  Input_elevator_offset += (ppm_length[3] - 1500); 
+  Input_rudder_offset += (ppm_length[5] - 1500); 
+     }
+  
+  Input_aileron_offset /= sampleNum; 
+  Input_elevator_offset /= sampleNum; 
+  Input_rudder_offset /= sampleNum; 
+    
+  pitchPID.SetMode(AUTOMATIC);
+  pitchPID.SetOutputLimits(-45, 45);
+  pitchPID.SetSampleTime(1);
+  
+  rollPID.SetMode(AUTOMATIC);
+  rollPID.SetOutputLimits(-45, 45);
+  rollPID.SetSampleTime(1);
+  
+  yawPID.SetMode(AUTOMATIC);
+  yawPID.SetOutputLimits(-25, 25);
+  yawPID.SetSampleTime(1);
+  
+  // configure LED for output
+    pinMode(LED_PIN, OUTPUT);
+  
+   
+  initMPU();
+    
+  }  // end of setup
+
+
+
+void loop ()
+{
+    
+   Input_aileron = map((ppm_length[0] - Input_aileron_offset),1000,2000,45,-45);  //corrected input signals divided between -90 and 90 degrees/second
+   Input_elevator = map((ppm_length[3] - Input_elevator_offset),1000,2000,45,-45); 
+   Input_throttle = map(ppm_length[4],1000,2000,-90,90); 
+   Input_rudder = map((ppm_length[5] - Input_rudder_offset),1000,2000,90,-90); 
+   Input_knobA = ppm_length[1];
+   Input_knobB = map(ppm_length[2],1100,1900,0,1000); 
+    
+  if (abs(Input_aileron)<0.5) Input_aileron=0; //deadstick value
+  if (abs(Input_elevator)<0.5) Input_elevator=0; 
+  if (abs(Input_rudder)<0.5) Input_rudder=0; 
+     
+  setpoint_roll = Input_aileron; //+= (Input_aileron/(micros() - oldtime))*400;  //generate setpoint for PID routine
+  setpoint_pitch = Input_elevator; //+= (Input_elevator/(micros() - oldtime))*400;
+  setpoint_yaw += (Input_rudder/(micros() - oldtime))*400; 
+  
+  //setpoint_roll -= setpoint_roll/25;  //slowly level quad
+  //setpoint_pitch -= setpoint_pitch/25;
+  
+  if (setpoint_roll<-45) setpoint_roll=-45;
+  if (setpoint_roll>45) setpoint_roll=45;
+  if (setpoint_pitch<-45) setpoint_pitch=-45;
+  if (setpoint_pitch>45) setpoint_pitch=45;
+  
+          
+   oldtime = micros();
+    
+   getYPR();   //get gyro data, 0=Yaw, 1=Pitch, 2=Roll    
+
+  ypr[0] *= 180/M_PI; //convert to degrees
+  ypr[1] *= 180/M_PI;
+  ypr[2] *= 180/M_PI;
+  
+  //correct yaw input for >360 degrees
+  if ((ypr[0]+(yaw_rev_count*360)-yprLast[0])>330) yaw_rev_count-=1;
+   else if((ypr[0]+(yaw_rev_count*360)-yprLast[0])<-330) yaw_rev_count+=1; 
+   //else if(abs(ypr[0]-yprLast[0])>30) ypr[0] = yprLast[0]; 
+   ypr[0] += yaw_rev_count*360;
+   
+  if(abs(ypr[1]-yprLast[1])>30) ypr[1] = yprLast[1];//exclude fault readings
+  if(abs(ypr[2]-yprLast[2])>30) ypr[2] = yprLast[2]; 
+
+   yprLast[0] = ypr[0]; 
+   yprLast[1] = ypr[1]; 
+   yprLast[2] = ypr[2]; 
+   
+     
+  if (Input_knobA <= 1300) pidyaw_Kp=Input_knobB/200;
+  //else if (Input_knobA > 1300 && Input_knobA < 1700) pidyaw_Ki=Input_knobB/1000;
+  else if (Input_knobA >= 1700) pidyaw_Kd=Input_knobB/10000;
+  
+   //update pid parameters 
+   pitchPID.SetTunings(pid_Kp, pid_Ki, pid_Kd);
+   pitchPID.Compute();
+   rollPID.SetTunings(pid_Kp, pid_Ki, pid_Kd);
+   rollPID.Compute();
+   yawPID.SetTunings(pidyaw_Kp, pidyaw_Ki, pidyaw_Kd);
+   yawPID.Compute();
+ 
+  // display setpoints
+           
+            Serial.print(Input_aileron);
+            Serial.print("\t");
+            Serial.print(setpoint_roll);
+            Serial.print("\t");
+            Serial.print(Output_aileron);
+            Serial.print("\t");
+            Serial.print(ypr[2]);
+            Serial.print("\t");
+            Serial.print(Output_elevator);
+            Serial.print("\t");
+            Serial.println(ypr[1]);
+                 
+     /*       
+              
+    display Euler angles in degrees
+            
+            //Serial.print("ypr\t");
+           // Serial.print(ypr[0] - gyro_yaw_offset);
+            //Serial.print("\t");
+            //Serial.print(ypr[1]);
+            //Serial.print("\t");
+            //Serial.print(ypr[2]);
+            //Serial.println("\t");
+     */       
+            
+    
+   output_motor_left_front = Input_throttle - Output_rudder - Output_elevator - Output_aileron + 90; // calculate motor output based on all inputs
+   output_motor_right_front = Input_throttle + Output_rudder - Output_elevator + Output_aileron + 90;
+   output_motor_left_back = Input_throttle + Output_rudder + Output_elevator - Output_aileron + 90;
+   output_motor_right_back = Input_throttle - Output_rudder + Output_elevator + Output_aileron + 90;
+    
+   if (output_motor_left_front <= 0)  {output_motor_left_front = 0;}  //limit outputs to a max of 1000 to 2000 milliseconds
+   else if (output_motor_left_front >= 180) {output_motor_left_front = 180;}
+    
+    if (output_motor_right_front <= 0)  {output_motor_right_front = 0;}
+   else if (output_motor_right_front >= 180) {output_motor_right_front = 180;}
+   
+   if (output_motor_left_back <= 0)  {output_motor_left_back = 0;}
+   else if (output_motor_left_back >= 180) {output_motor_left_back = 180;}
+   
+   if (output_motor_right_back <= 0)  {output_motor_right_back = 0;}
+   else if (output_motor_right_back >= 180) {output_motor_right_back = 180;}
+  
+  
+  if (Input_throttle < -55)  //no motors running when throttle is low for safety
+  {
+   //also reset setpoints for quadcopter control
+   setpoint_roll=0;
+   setpoint_pitch=0;
+   setpoint_yaw=ypr[0];
+        
+   output_motor_left_front=20;
+   output_motor_right_front=20;
+   output_motor_left_back=20;
+   output_motor_right_back=20;
+   }
+  
+   myservo1.write(output_motor_left_front);
+   myservo2.write(output_motor_right_front);
+   myservo3.write(output_motor_left_back);
+   myservo4.write(output_motor_right_back);
+ 
+ 
+ // blink LED to indicate activity, change state every 10 loops
+ if (m>10)
+ {
+   m=1;     
+   blinkState = !blinkState;
+        digitalWrite(LED_PIN, blinkState); 
+ }
+ m+=1;
+}  // end of loop
+
+
+
+
+void getYPR(){
+  
+  
+  // if programming failed, don't try to do anything
+    if (!dmpReady) return;
+
+    // wait for MPU interrupt or extra packet(s) available
+    while (!mpuInterrupt && fifoCount < packetSize) {
+        // other program behavior stuff here
+        // .
+        // .
+        // .
+        // if you are really paranoid you can frequently test in between other
+        // stuff to see if mpuInterrupt is true, and if so, "break;" from the
+        // while() loop to immediately process the MPU data
+        // .
+        // .
+        // .
+    }
+
+    // reset interrupt flag and get INT_STATUS byte
+    mpuInterrupt = false;
+    mpuIntStatus = mpu.getIntStatus();
+
+    // get current FIFO count
+    fifoCount = mpu.getFIFOCount();
+
+    // check for overflow (this should never happen unless our code is too inefficient)
+    if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+        // reset so we can continue cleanly
+        mpu.resetFIFO();
+        Serial.println(F("FIFO overflow!"));
+
+    // otherwise, check for DMP data ready interrupt (this should happen frequently)
+    } else if (mpuIntStatus & 0x02) {
+        // wait for correct available data length, should be a VERY short wait
+        while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+        // read a packet from FIFO
+        mpu.getFIFOBytes(fifoBuffer, packetSize);
+        
+        // track FIFO count here in case there is > 1 packet available
+        // (this lets us immediately read more without waiting for an interrupt)
+        fifoCount -= packetSize;
+   
+            mpu.dmpGetQuaternion(&q, fifoBuffer);
+            mpu.dmpGetGravity(&gravity, &q);
+            mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+    }
+    
+}
+
+void initMPU(){
+  
+  // join I2C bus (I2Cdev library doesn't do this automatically)
+    #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+        Wire.begin();
+        TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz)
+    #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+        Fastwire::setup(400, true);
+    #endif
+
+    // initialize serial communication
+    // (115200 chosen because it is required for Teapot Demo output, but it's
+    // really up to you depending on your project)
+    Serial.begin(115200);
+    while (!Serial); // wait for Leonardo enumeration, others continue immediately
+
+    // NOTE: 8MHz or slower host processors, like the Teensy @ 3.3v or Ardunio
+    // Pro Mini running at 3.3v, cannot handle this baud rate reliably due to
+    // the baud timing being too misaligned with processor ticks. You must use
+    // 38400 or slower in these cases, or use some kind of external separate
+    // crystal solution for the UART timer.
+
+    // initialize device
+    Serial.println(F("Initializing I2C devices..."));
+    mpu.initialize();
+
+    // verify connection
+    Serial.println(F("Testing device connections..."));
+    Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+
+        // load and configure the DMP
+    Serial.println(F("Initializing DMP..."));
+    devStatus = mpu.dmpInitialize();
+
+    // supply your own gyro offsets here, scaled for min sensitivity
+    mpu.setXGyroOffset(220);
+    mpu.setYGyroOffset(76);
+    mpu.setZGyroOffset(-85);
+    mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+
+    // make sure it worked (returns 0 if so)
+    if (devStatus == 0) {
+        // turn on the DMP, now that it's ready
+        Serial.println(F("Enabling DMP..."));
+        mpu.setDMPEnabled(true);
+
+        // enable Arduino interrupt detection
+        Serial.println(F("Enabling interrupt detection (Arduino external interrupt 1)..."));
+        attachInterrupt(1, dmpDataReady, RISING);
+        mpuIntStatus = mpu.getIntStatus();
+
+        // set our DMP Ready flag so the main loop() function knows it's okay to use it
+        Serial.println(F("DMP ready! Waiting for first interrupt..."));
+        dmpReady = true;
+
+        // get expected DMP packet size for later comparison
+        packetSize = mpu.dmpGetFIFOPacketSize();
+    } else {
+        // ERROR!
+        // 1 = initial memory load failed
+        // 2 = DMP configuration updates failed
+        // (if it's going to break, usually the code will be 1)
+        Serial.print(F("DMP Initialization failed (code "));
+        Serial.print(devStatus);
+        Serial.println(F(")"));
+    }
+
+        
+  }
+
+
+#endif
