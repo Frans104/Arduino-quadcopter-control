@@ -2,9 +2,12 @@
 
 
 volatile char statemachine = 0;
+volatile unsigned long output_motor_left_front; //servo pulsewidths in microseconds
+volatile unsigned long output_motor_right_front;
+volatile unsigned long output_motor_left_back;
+volatile unsigned long output_motor_right_back;
 
-
-  pinMode(5, OUTPUT);
+  pinMode(5, OUTPUT); //pin's connected to servo's 
   pinMode(6, OUTPUT);
   pinMode(9, OUTPUT);
   pinMode(10, OUTPUT);
@@ -13,6 +16,12 @@ void setup()
 {
   Timer1.initialize(1000);
   Timer1.attachInterrupt(timercallback);
+}
+
+
+void loop()
+{
+ //main program 
 }
 
 
